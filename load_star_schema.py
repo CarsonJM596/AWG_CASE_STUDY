@@ -1,37 +1,46 @@
-import logging 
+import logging
+import os
 import duckdb
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+
 def build_star_schema(db_path: str, schema_file: str):
     conn = duckdb.connect(db_path)
 
     # 1. Execute DDL from schema.sql
-    logging.info("Executing DDL statements from schema.sql ...")
+    logging.info("Executing DDL statements from schema.sql...")
     with open(schema_file, "r") as f:
         sql_script = f.read()
-    conn.executemany(sql_script)
+    conn.execute(sql_script)
+
+    # Clear existing tables to ensure clean reload
+    conn.execute("TRUNCATE TABLE fact_daily_sales;")
+    conn.execute("TRUNCATE TABLE dim_product;")
+    conn.execute("TRUNCATE TABLE dim_store;")
 
     # 2. Populate dim_product
     logging.info("Populating dim_product...")
-    conn.execute("""
-        INSERT OR REPLACE INTO dim_product (product_key, sku, product_name, category, department, standard_unit_cost)
+    catalog_path = os.path.join("data", "raw_product_catalog.csv")
+    conn.execute(f"""
+        INSERT INTO dim_product (product_key, sku, product_name, category, department, standard_unit_cost)
         SELECT 
             ROW_NUMBER() OVER (ORDER BY sku) AS product_key,
-            sku,
-            product_name,
-            category,
-            department,
-            standard_unit_cost
-        FROM (SELECT DISTINCT sku, product_name, category, department, standard_unit_cost FROM df_transformed);
+            TRIM(sku) AS sku,
+            TRIM(product_name) AS product_name,
+            TRIM(category) AS category,
+            TRIM(department) AS department,
+            CAST(standard_unit_cost AS DECIMAL(10,2)) AS standard_unit_cost
+        FROM read_csv_auto('{catalog_path}')
+        WHERE sku IS NOT NULL AND TRIM(sku) != '';
     """)
 
     # 3. Populate dim_store
     logging.info("Populating dim_store...")
     conn.execute("""
-        INSERT OR REPLACE INTO dim_store (store_key, store_id)
+        INSERT INTO dim_store (store_key, store_id)
         SELECT 
             ROW_NUMBER() OVER (ORDER BY store_id) AS store_key,
             store_id
@@ -43,7 +52,7 @@ def build_star_schema(db_path: str, schema_file: str):
         "Populating fact_daily_sales aggregated at Daily Store-Product grain..."
     )
     conn.execute("""
-        INSERT OR REPLACE INTO fact_daily_sales (
+        INSERT INTO fact_daily_sales (
             sales_date_key,
             store_key,
             product_key,
@@ -69,11 +78,8 @@ def build_star_schema(db_path: str, schema_file: str):
 
     logging.info("Star Schema build complete.")
 
-    # Validation Output
     print("\n--- Fact Table Preview (fact_daily_sales) ---")
-    print(
-        conn.execute("SELECT * FROM fact_daily_sales").fetchdf()
-    )
+    print(conn.execute("SELECT * FROM fact_daily_sales").fetchdf())
 
     conn.close()
 
